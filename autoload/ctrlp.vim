@@ -5,6 +5,8 @@
 " Version:       1.79
 " =============================================================================
 
+let g:match_groups = []
+
 " ** Static variables {{{1
 " s:ignore() {{{2
 fu! s:ignore()
@@ -57,6 +59,7 @@ let [s:pref, s:bpref, s:opts, s:new_opts, s:lc_opts] =
 	\ 'arg_map':               ['s:argmap', 0],
 	\ 'buffer_func':           ['s:buffunc', {}],
 	\ 'by_filename':           ['s:byfname', 0],
+	\ 'fuzzy':                 ['s:fuzzy', 0],
 	\ 'custom_ignore':         ['s:usrign', s:ignore()],
 	\ 'default_input':         ['s:deftxt', 0],
 	\ 'dont_split':            ['s:nosplit', 'netrw'],
@@ -536,6 +539,7 @@ fu! s:Render(lines, pat)
 	" Setup the match window
 	sil! exe '%d _ | res' height
 	" Print the new items
+
 	if empty(lines)
 		let [s:matched, s:lines] = [[], []]
 		let lines = [' == NO ENTRIES ==']
@@ -546,6 +550,9 @@ fu! s:Render(lines, pat)
 		if s:dohighlight() | cal clearmatches() | en
 		retu
 	en
+
+    "call add(lines, pat)
+
 	let s:matched = copy(lines)
 	" Sorting
 	if !s:nosort()
@@ -553,6 +560,7 @@ fu! s:Render(lines, pat)
 		cal sort(lines, 's:mixedsort')
 		unl s:compat
 	en
+
 	if s:mw_order == 'btt' | cal reverse(lines) | en
 	let s:lines = copy(lines)
 	cal map(lines, 's:formatline(v:val)')
@@ -592,7 +600,7 @@ fu! s:BuildPrompt(upd)
 	let base = ( s:regexp ? 'r' : '>' ).( s:byfname() ? 'd' : '>' ).'> '
 	let str = escape(s:getinput(), '\')
 	let lazy = str == '' || exists('s:force') || !has('autocmd') ? 0 : s:lazy
-	if a:upd && !lazy && ( s:matches || s:regexp || exists('s:did_exp')
+	if a:upd && !lazy && ( s:matches || s:fuzzy || s:regexp || exists('s:did_exp')
 		\ || str =~ '\(\\\(<\|>\)\|[*|]\)\|\(\\\:\([^:]\|\\:\)*$\)' )
 		sil! cal s:Update(str)
 	en
@@ -615,7 +623,7 @@ fu! s:BuildPrompt(upd)
 		exe 'echoh' hibase '| echon "_" | echoh None'
 	en
 endf
-" - SetDefTxt() {{{1
+" - SetDefTxt()
 fu! s:SetDefTxt()
 	if s:deftxt == '0' || ( s:deftxt == 1 && !s:ispath ) | retu | en
 	let txt = s:deftxt
@@ -1622,12 +1630,21 @@ fu! s:highlight(pat, grp)
 	if s:matcher != {} | retu | en
 	cal clearmatches()
 	if !empty(a:pat) && s:ispath
-		let pat = s:regexp ? substitute(a:pat, '\\\@<!\^', '^> \\zs', 'g') : a:pat
-		if s:byfname
-			let pat = substitute(pat, '\[\^\(.\{-}\)\]\\{-}', '[^\\/\1]\\{-}', 'g')
-			let pat = substitute(pat, '\$\@<!$', '\\ze[^\\/]*$', 'g')
-		en
-		cal matchadd(a:grp, ( s:martcs == '' ? '\c' : '\C' ).pat)
+		if s:regexp
+			let pat = substitute(a:pat, '\\\@<!\^', '^> \\zs', 'g')
+			cal matchadd(a:grp, ( s:martcs == '' ? '\c' : '\C'  ).pat)
+		elseif s:fuzzy == 1
+            for match_group in g:match_groups
+                call matchadd(a:grp, ( s:martcs == '' ? '\c' : '\C'  ).match_group)
+            endfor
+		else
+			let pat = a:pat
+			if s:byfname
+				let pat = substitute(pat, '\[\^\(.\{-}\)\]\\{-}', '[^\\/\1]\\{-}', 'g')
+				let pat = substitute(pat, '\$\@<!$', '\\ze[^\\/]*$', 'g')
+			en
+			cal matchadd(a:grp, ( s:martcs == '' ? '\c' : '\C' ).pat)
+		endif
 		cal matchadd('CtrlPLinePre', '^>')
 	en
 endf
@@ -2108,12 +2125,86 @@ fu! s:matchtabe(item, pat)
 	retu match(split(a:item, '\t\+[^\t]\+$')[0], a:pat)
 endf
 
+function s:getCharsRE(last_char, is_inside_part, is_last_part)
+	" if you are inside a path part, then we don't want to change directories
+	" if you are searching the filename, then we don't want to change directories
+	let charRE = a:is_inside_part == 1 || a:is_last_part == 1 ? '[^ /'.a:last_char.']' : '.'
+
+	let charRE .= '\{-}'
+
+	return charRE
+endfunction
+
 fu! s:buildpat(lst)
-	let pat = a:lst[0]
-	for item in range(1, len(a:lst) - 1)
-		let pat .= '[^'.a:lst[item - 1].']\{-}'.a:lst[item]
-	endfo
-	retu pat
+	if s:fuzzy == 1
+		let is_last_part = 1
+		let is_inside_part = 0
+
+		let g:match_groups = []
+
+		let pat = '$'
+		let last_char = ''
+
+		" loop through each character and build our pat
+		for item in range(1, len(a:lst))
+			" we build it in reverse, since we treat the last part differently
+			" than the first part.  We could go in and break it a part
+			" initially, but that's an extra step
+			let char = a:lst[len(a:lst)-item]
+
+			" a / will trigger a path part break, so treat it a little
+			" differently
+			if char != '/' && char != ' '
+				" go through and add this new character to all our match
+				" groups, we have to add all the characters to each group so
+				" that we don't accidentally find characters twice when
+				" matching short searches
+				for i in range(len(g:match_groups))
+					let g:match_groups[i] = '[^ /'.char.']\{-}'.char.g:match_groups[i]
+				endfor
+
+				" get the regex for the possible characters inbetween this
+				" character and the last one.  this depends on where we are in
+				" the search
+				let charRE = s:getCharsRE(last_char, is_inside_part, is_last_part)
+
+				" create the new match group for this character.  each match
+				" group matches a single character from the search
+				let match_group = '[^ /'.char.']\{-}\zs'.char.'\ze'.charRE.pat
+				call add(g:match_groups, match_group)
+
+				" update our pattern with the new character and the possible
+				" characters that can go after it
+				let pat = char.charRE.pat
+
+				" update our state
+				let is_inside_part = 1
+				let last_char = char
+			else
+				let charRE = s:getCharsRE('\/', is_inside_part, is_last_part)
+				let pat = '\/'.charRE.pat
+				let is_last_part = 0
+				let is_inside_part = 0
+				let last_char = ''
+
+				for i in range(len(g:match_groups))
+					let g:match_groups[i] = '.\{-}\/.\{-}'.g:match_groups[i]
+				endfor
+			endif
+		endfor
+
+		for i in range(len(g:match_groups))
+				let g:match_groups[i] = '^.\{-}'.g:match_groups[i]
+		endfor
+
+		return pat
+	else
+		let pat = a:lst[0]
+		for item in range(1, len(a:lst) - 1)
+			let pat .= '[^'.a:lst[item - 1].']\{-}'.a:lst[item]
+		endfo
+		return pat
+	fi
 endf
 
 fu! s:mfunc()
